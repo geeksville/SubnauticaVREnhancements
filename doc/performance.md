@@ -1,9 +1,10 @@
 # Subnautica VR Performance on Steam Frame
 
-> Status: investigation notes (2026-10-10). Everything below was gathered live
-> from the device over SSH (`ssh frame`) while the game was installed and had
-> been run at least once. Claims are marked **[verified]** (read directly from
-> the device) or **[hypothesis]** (inferred from the stack, needs a test).
+> Status: investigation notes (2026-10-10, updated 2026-10-11). Everything
+> below was gathered live from the device over SSH (`ssh frame`) while the game
+> was installed and had been run at least once. Claims are marked
+> **[verified]** (read directly from the device) or **[hypothesis]** (inferred
+> from the stack, needs a test).
 
 ## TL;DR
 
@@ -18,13 +19,17 @@ Subnautica.exe (x86-64, D3D11)
                  └─ Turnip    (Vulkan → Adreno 750)
 ```
 
-The game is currently **capped at 45 FPS by its own in-game setting**
-(`Graphics/FrameRate = 45`), and SteamVR has already **auto-scaled the render
-target down to 64%** (1728×1728/eye) because the GPU can't keep up at full res.
-The single biggest, safest win is to **remove the 45 FPS cap** so the game can
-render at the HMD's 90 Hz. After that, the next lever is **reducing GPU cost**
-(render scale, post-processing, single-pass stereo), and finally **reducing CPU
-cost** (FEX TSO, per-frame mod overhead).
+The game was **capped at 45 FPS by its own in-game setting**
+(`Graphics/FrameRate = 45`), and SteamVR had **auto-scaled the render target
+down to 64%** (1728×1728/eye) because the GPU can't keep up at full res.
+
+**Update (2026-10-11):** the 45 FPS cap has been **removed** by the mod
+(3.1 ✅), and the game is now confirmed **GPU-bound in-game** — not CPU-bound.
+SteamVR's perf criteria shows ~26 ms frame time with **GPU time ≈ frame time**
+(~25 ms) and CPU time only ~10–13 ms. Disabling FEX TSO + enabling multiblock
+(3.5) made **no measurable difference**, which is consistent with a GPU
+bottleneck. The remaining levers are **reducing GPU cost** (render scale,
+post-processing, single-pass stereo).
 
 ---
 
@@ -83,23 +88,39 @@ SteamVR's automatic resolution scaling reacting to the GPU being overloaded.
 
 There are **three independent reasons**, in order of impact:
 
-### 2.1 The game is hard-capped at 45 FPS by its own setting **[verified]**
+### 2.1 The game was hard-capped at 45 FPS by its own setting **[verified, fixed]**
 `Graphics/FrameRate = 45` in `options.bin`. Subnautica applies this to
 `Application.targetFrameRate`, which caps the render loop. In VR this means the
 game submits at most 45 frames/sec to SteamVR, which then has to reproject
-(motion-smooth) the other 45 of the 90 Hz. **This is almost certainly the
-"45 fps" you're seeing** — it's not the hardware ceiling, it's a software cap.
+(motion-smooth) the other 45 of the 90 Hz.
 
-### 2.2 The GPU is genuinely loaded (SteamVR already downscaled) **[verified]**
-SteamVR's auto-resolution dropped to 64% because the Adreno 750 + Turnip stack
-can't sustain full-res 90 Hz. So even uncapped, the GPU is a real constraint.
+**Fixed (2026-10-11):** the mod now forces `Application.targetFrameRate = -1`
+(unlimited) while VR is active (see 3.1). Verified in `Player.log`:
+`[VR Enhancements] Removed FPS cap: targetFrameRate = -1`.
 
-### 2.3 The CPU is paying a heavy translation tax **[hypothesis, high confidence]**
-Every game-logic/CPU instruction runs through FEX's x86→ARM JIT. FEX defaults
-to **TSO (Total Store Order)** memory-ordering emulation for compatibility,
-which is significantly slower than native ARM memory ordering. The game is
-Mono-based (managed code), so a large fraction of the frame is CPU-bound and
-goes through the JIT. This is a per-frame tax on top of the GPU cost.
+### 2.2 The GPU is the real bottleneck in-game **[verified, corrected 2026-10-11]**
+SteamVR's perf criteria (`~/.local/share/Steam/logs/perfcriteria.txt`) shows
+the columns `frame time(ms), cpu time(ms), gpu time(ms), #reprojected`:
+
+| Context | frame | cpu | gpu | #reproj |
+|---|---|---|---|---|
+| Main menu / loading | ~7.5 | ~7.5 | ~2.7 | 0 |
+| In-game (both sessions) | ~26 | ~10–13 | **~26** | 1 |
+
+In-game, **GPU time ≈ frame time (~26 ms ≈ 38 FPS)** while CPU time is only
+~10–13 ms. The game is **GPU-bound**, not CPU-bound. This is why removing the
+FPS cap didn't raise the number: the GPU genuinely can't produce more than
+~40 FPS at the current render scale, and SteamVR reprojects the rest of the
+90 Hz.
+
+### 2.3 The CPU translation tax is real but NOT the current bottleneck **[verified, corrected 2026-10-11]**
+Every game-logic/CPU instruction runs through FEX's x86→ARM JIT, and FEX
+defaults to **TSO (Total Store Order)** memory-ordering emulation, which is
+slower than native ARM ordering. However, a controlled experiment on
+2026-10-11 (launch options `STEAM_FEX_TSOENABLED=0 STEAM_FEX_MULTIBLOCK=1`)
+showed **no measurable improvement** — frame time stayed ~26 ms and
+reprojection stayed ~81%. This is consistent with the GPU-bound diagnosis:
+optimizing the CPU layer can't help when the GPU is the limit.
 
 ### 2.4 The game renders in the most expensive stereo mode **[verified]**
 Unity log: `Created eye textures with a "separate" layout. The "multi-pass"
@@ -116,21 +137,26 @@ GPU win.
 Ranked by (expected gain × ease × safety). Items marked **[mod]** are things we
 can implement in this repo; items marked **[config]** are device/Steam settings.
 
-### 3.1 Remove the 45 FPS cap — **[mod], biggest & safest win**
+### 3.1 Remove the 45 FPS cap — **[mod], biggest & safest win** ✅ implemented
 Patch the game so that when VR is active, `Application.targetFrameRate` is set
 to the HMD refresh rate (90) or `-1` (unlimited) instead of the 45 from
 `Graphics/FrameRate`.
 
-- **Where**: a new Harmony patch in this mod (e.g. on `GameSettings` /
-  `VROptions` / the frame-rate setter, or simply a `LateUpdate`/`Update` that
-  forces `Application.targetFrameRate` while `XRSettings.enabled`).
+- **Where**: `VREnhancements/FrameRateFix.cs` — a `LateUpdate` hook in
+  `MainPatcher` forces `Application.targetFrameRate` while `XRSettings` is
+  active, and a `GameSettings.SerializeVRSettings` postfix re-applies it after
+  settings (re)load.
+- **Config** (`VREnhancements.cfg` → `[Performance]`):
+  - `removeFPSCap = true` (default) — enable/disable the override.
+  - `targetFPS = 0` (default) — 0 = unlimited (`-1`), 90 = HMD refresh rate,
+    any other value used as-is.
 - **Expected gain**: if the GPU can actually do more than 45, this directly
   raises render FPS. Even if it can't, it removes the artificial ceiling and
   lets SteamVR's reprojection work from a higher base.
 - **Risk**: low. Worst case the game renders at whatever the GPU can do.
-- **Caveat**: verify the game doesn't re-apply the cap every frame (it may
-  re-apply on settings load / `SerializeVRSettings`). The mod already patches
-  `GameSettings.SerializeVRSettings`, so we can hook there too.
+- **Caveat**: the game re-applies the cap on settings load; the
+  `SerializeVRSettings` postfix handles that. If the game re-applies it every
+  frame, the `LateUpdate` hook covers that too.
 
 ### 3.2 Lower per-eye render resolution — **[config] + [mod]**
 - **[config]** SteamVR per-app resolution override for app 264710 (set
@@ -165,7 +191,7 @@ Patch `XRSettings.stereoRenderingMode = SinglePassInstanced` at VR init.
   test-on-device pass and probably a config flag to opt in/out.
 - **Recommendation**: implement behind a config flag, default off, and test.
 
-### 3.5 Reduce FEX CPU tax — **[config]**
+### 3.5 Reduce FEX CPU tax — **[config] — tested, no measurable gain**
 FEX supports `STEAM_FEX_TSOENABLED` and `STEAM_FEX_MULTIBLOCK` (see
 `FEX-Emu/fex-compat-tool`). TSO emulation is the big CPU cost.
 
@@ -173,10 +199,14 @@ FEX supports `STEAM_FEX_TSOENABLED` and `STEAM_FEX_MULTIBLOCK` (see
   ```
   STEAM_FEX_TSOENABLED=0 STEAM_FEX_MULTIBLOCK=1 WINEDLLOVERRIDES="winhttp=n,b" %command%
   ```
-- **Expected gain**: potentially large CPU-side speedup (game logic, physics,
-  Mono GC). **Risk**: TSO off can cause rare crashes/glitches in some games —
-  test carefully. Multiblock is generally safe and helps JIT throughput.
-- This is a device setting, not a mod change, but worth documenting here.
+- **Tested 2026-10-11**: no measurable improvement. Frame time stayed ~26 ms,
+  reprojection stayed ~81% (vrserver: `NumReprojected 7081 / 8709 presents`).
+  Consistent with the GPU-bound diagnosis (2.2) — the CPU isn't the limit.
+- **Risk**: TSO off can cause rare crashes/glitches in some games — test
+  carefully. Multiblock is generally safe and helps JIT throughput.
+- **Verdict**: keep the options if you like (they don't hurt), but don't expect
+  FPS gains. Revisit only if a future change makes the game CPU-bound (e.g.
+  single-pass stereo cuts GPU time below CPU time).
 
 ### 3.6 Reduce per-frame overhead in the mod itself — **[mod]**
 On a JIT-translated CPU, per-frame managed allocations and `GetComponent`
@@ -190,7 +220,8 @@ calls are comparatively expensive. The mod has several hot paths:
 
 These are small individually but add up under FEX. A "performance pass" that
 caches components/transforms and skips work when nothing changed is a
-low-risk, low-gain cleanup.
+low-risk, low-gain cleanup. **Note**: since the game is GPU-bound (2.2), this
+is lower priority than 3.2/3.3/3.4.
 
 ### 3.7 Shader-cache warm-up — **[config]**
 Mesa shader cache is only ~19 MB and no DXVK cache was found, so the game is
@@ -204,25 +235,30 @@ likely still compiling shaders on first encounters (stutter). Options:
 
 ## 4. Recommended next steps (in order)
 
-1. **Remove the 45 FPS cap in the mod** (3.1) — do this first; it's the
-   cheapest and most likely to directly raise the number you're seeing.
-2. **Measure** with the cap removed before changing anything else — use
-   SteamVR's performance HUD / `mangoapp` to see whether we're now GPU-bound
-   or CPU-bound.
-3. If **GPU-bound**: apply 3.2 (lower render scale) and 3.3 (disable SSR/AO/
-   DOF), then optionally try 3.4 (single-pass) behind a flag.
-4. If **CPU-bound**: apply 3.5 (FEX TSO off / multiblock) and 3.6 (mod hot-path
-   cleanup).
+1. **Remove the 45 FPS cap in the mod** (3.1) — ✅ done 2026-10-11. Verified in
+   `Player.log`: `targetFrameRate = -1`.
+2. **Measure** with the cap removed — ✅ done. SteamVR perf criteria shows the
+   game is **GPU-bound in-game** (~26 ms frame, GPU ~26 ms, CPU ~10–13 ms).
+3. **GPU-bound confirmed** → apply 3.2 (lower render scale) and 3.3 (disable
+   SSR/AO/DOF), then optionally try 3.4 (single-pass) behind a flag.
+4. ~~If **CPU-bound**: apply 3.5 (FEX TSO off / multiblock) and 3.6 (mod
+   hot-path cleanup).~~ — 3.5 tested, no gain. 3.6 is low priority while
+   GPU-bound.
 5. Warm shader caches (3.7) regardless.
 
 ## 5. What I can implement in this repo
 
-- **3.1** — a Harmony patch forcing `Application.targetFrameRate` to 90 (or
-  unlimited) while VR is active, plus a config entry.
-- **3.2** — expose `VR/RenderScale` in `VREnhancements.cfg`.
+- **3.1** ✅ done — `FrameRateFix.cs` forces `Application.targetFrameRate` to
+  unlimited (or 90) while VR is active, with `[Performance]` config entries.
+  Build with `bin/build-mod.sh`, deploy with `bin/deploy-mod.sh`.
+- **3.2** — expose `VR/RenderScale` in `VREnhancements.cfg`. **Next best lever**
+  now that the game is confirmed GPU-bound.
 - **3.3** — a "VR Performance" config toggle that disables SSR/AO/DOF/Bloom.
-- **3.4** — a config-gated single-pass-instanced patch (default off).
+  Also high value while GPU-bound.
+- **3.4** — a config-gated single-pass-instanced patch (default off). Biggest
+  potential GPU win, needs on-device testing.
 - **3.6** — a hot-path cleanup pass (cache components, reduce per-frame work).
+  Low priority while GPU-bound.
 
-Items 3.5 and 3.7 are device/Steam settings — I can document exact commands,
-but they're not code changes to this repo.
+Items 3.5 (tested, no gain) and 3.7 are device/Steam settings — documented
+above with exact commands, but not code changes to this repo.

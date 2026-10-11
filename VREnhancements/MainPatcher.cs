@@ -16,6 +16,11 @@ namespace VREnhancements
 
         private void Awake()
         {
+            // Load mod config (frame rate override etc.) up front so the
+            // LateUpdate hook has valid values even before the game's first
+            // settings (de)serialization.
+            AdditionalVROptions.LoadVRConfig();
+
             // Subscribe to VR device loaded event
             XRDevice.deviceLoaded += OnVRDeviceLoaded;
 
@@ -24,6 +29,13 @@ namespace VREnhancements
             {
                 OnVRDeviceLoaded(XRSettings.loadedDeviceName);
             }
+        }
+
+        private void LateUpdate()
+        {
+            // Cheap per-frame check: re-apply the FPS override in case the game
+            // (or a settings reload) reset Application.targetFrameRate.
+            FrameRateFix.Apply();
         }
 
         private void OnVRDeviceLoaded(string loadedDeviceName)
