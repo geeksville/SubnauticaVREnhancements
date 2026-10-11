@@ -271,6 +271,141 @@ likely still compiling shaders on first encounters (stutter). Options:
   the XR device hangs the game. Code removed.
 - **3.6** — a hot-path cleanup pass (cache components, reduce per-frame work).
   Low priority while GPU-bound.
+- **6.4** ❌ failed experiment (2026-10-11) — `VRLODScaling.cs` scales the
+  game's custom `BehaviourLOD` thresholds + shadows, but no FPS gain (GPU is
+  fill-rate/post-processing bound). **Defaulted to OFF** (`vrLODScaling = false`).
 
 Items 3.5 (tested, no gain) and 3.7 are device/Steam settings — documented
 above with exact commands, but not code changes to this repo.
+
+---
+
+## 6. Advanced ideas (external AI suggestions — assessed 2026-10-11)
+
+> These came from another AI. Each is assessed against what we've verified on
+> the device (GPU-bound at ~26 ms, Unity 2019.4, DXVK 2.7.1, SteamVR on ARM64).
+> Verdicts: ✅ worth trying · ⚠️ plausible but hard/risky · ❌ not viable.
+
+### 6.1 Inject spatial upscaling (FSR) — ⚠️ plausible, but the wrong layer
+
+**The idea**: patch the render pipeline to drop native render scale and inject
+an FSR compute pass before handing the frame to SteamVR.
+
+**Assessment**:
+- The **goal is right** — we're GPU-bound and resolution is the biggest lever
+  (3.2). But you don't need a compute-shader injection to get there: the game
+  already exposes `VR/RenderScale` (`XRSettings.eyeTextureResolutionScale`),
+  and SteamVR has a per-app resolution override. Both are one-line changes.
+- **FSR in the Unity pipeline is the hard way.** Subnautica's render pipeline
+  is custom (UWE post-processing, WBOIT, water). Injecting an FSR pass means
+  hooking the frame-end blit, which in multi-pass stereo means two eye
+  textures, plus the custom pipeline's own blits. High effort, high breakage
+  risk for what is essentially a sharper downscale.
+- **Better alternative**: SteamVR's own upscaler. SteamVR on the frame already
+  has FSR-like upscaling (the `GpuSpeed` auto-resolution + upscale path), and
+  it's a config toggle, not a mod. Try that before writing shader code.
+- **Verdict**: the *outcome* (lower render scale) is already 3.2; the *method*
+  (FSR injection) is over-engineered for this stack.
+
+### 6.2 Force fixed foveated rendering (FFR) — ⚠️ plausible, but not via the game
+
+**The idea**: the Steam Frame supports foveated rendering; write an OpenVR or
+Vulkan API layer to apply a radial density mask before frame submission.
+
+**Assessment**:
+- **Verified on device**: SteamVR's compositor (`vrcompositor`) contains
+  foveation code (`DrawSceneFoveated`, `Foveated Sharpening`,
+  `XR_TYPE_FOVEATION_PROFILE_CREATE_INFO_FB`), so the *runtime* supports it.
+  But the game's `openvr_api.dll` has **no foveation API** (verified: no
+  `Foveation` strings), and the game is D3D11 → DXVK → Vulkan, so it can't
+  ask for it.
+- **The API-layer approach is real but heavy**: a Vulkan layer that applies
+  foveation to DXVK's output would need to intercept swapchain images and
+  rewrite the density mask per frame. That's a C/C++ project with its own
+  build/deploy pipeline, and it would apply to *all* D3D11 games, not just
+  Subnautica.
+- **Simpler path that gets most of the win**: SteamVR's fixed foveated
+  rendering (if exposed on the frame) or just lowering render scale (3.2).
+  FFR's real benefit is *peripheral* resolution drop; a uniform downscale
+  (3.2) captures most of the fill-rate savings with zero code.
+- **Verdict**: technically possible, but a large project for a marginal gain
+  over 3.2. Revisit only if 3.2/3.3 aren't enough.
+
+### 6.3 IL transpilation for draw-call murder — ❌ mostly not viable, one nugget
+
+**The idea**: use `[HarmonyTranspiler]` to rewrite CIL at runtime, nuking
+expensive shaders and enforcing `StereoInstancing`.
+
+**Assessment**:
+- **The stereo-instancing part is dead on arrival** — we proved in 3.4 that
+  Unity 2019.4's `XRSettings.stereoRenderingMode` is get-only and the mode is
+  baked at device load. A transpiler can't change the native rendering path
+  any more than a getter patch could. The game's shaders also don't declare
+  instancing support (no `INSTANCING_ON` variants found), so even if the mode
+  flipped, most materials would render wrong.
+- **The "nuke expensive shaders" part is real but doesn't need IL weaving.**
+  `WaterSunShaftsOnCamera` (the water sun-shafts the mod already optimizes)
+  and the post-processing stack (SSR/AO/DOF/Bloom) can be disabled with plain
+  Harmony patches or config toggles — that's exactly 3.3. A transpiler is the
+  most fragile way to do it (opcode offsets break on every game update).
+- **Verdict**: transpilers are the wrong tool here. 3.3 (disable
+  post-processing) captures the safe 80% of this idea.
+
+### 6.4 Aggressive VR-specific LOD scaling — ❌ failed experiment, default off
+
+**The idea**: when `XRSettings.enabled`, slash LOD biases, view distances, and
+shadow cascades; iterate `TechType` prefabs to reduce what's rendered.
+
+**Implementation** (`VREnhancements/VRLODScaling.cs`):
+- **v1 (no effect)**: initially set `QualitySettings.lodBias` — but Subnautica
+  does **not** use Unity's `lodBias` for its LOD system. It uses a custom
+  `BehaviourLOD` component with hardcoded distance thresholds
+  (`veryCloseThreshold`/`closeThreshold`/`farThreshold`, default 10/50/500 m).
+  Verified by decompiling `BehaviourLOD` — the LOD state is chosen purely from
+  `distToPlayerSq` vs those thresholds.
+- **v2 (correct, tested)**: patched `BehaviourLOD.Awake` to scale the distance
+  thresholds down (0.6×) while VR is active, plus scaled
+  `QualitySettings.shadowDistance`/`shadowCascades`. Confirmed firing in
+  `Player.log`: `VR LOD scaling applied: lodDistanceScale=0.6, shadowDistance=60,
+  shadowCascades=2`.
+- **Result (2026-10-11)**: **FAILED for the FPS goal.** Pop-in was clearly
+  visible (proving the LOD reduction worked), but GPU time stayed ~28 ms and
+  FPS stayed ~34 (reprojection 87%). The GPU cost is **fill-rate /
+  post-processing bound** (pixels at 1728×1728/eye + SSR/AO/DOF/Bloom), not
+  geometry/vertex bound — cutting LOD detail doesn't touch the bottleneck.
+- **Verdict**: feature kept in the mod but **defaulted to OFF**
+  (`vrLODScaling = false`). Can be enabled manually if pop-in is acceptable,
+  but it does not improve FPS.
+- Config (`VREnhancements.cfg` → `[Performance]`):
+  - `vrLODScaling = false` (default) — master toggle.
+  - `vrLODDistanceScale = 0.6` — multiplier on LOD distance thresholds.
+  - `vrShadowDistance = 60` — shadow distance in meters.
+  - `vrShadowCascades = 2` — shadow cascade count.
+
+### 6.5 Decompile existing mods for performance ideas — ✅ good research step
+
+**The idea**: decompile `SubmersedVR` / `VR Enhancements` to find where they
+left performance on the table.
+
+**Assessment**:
+- Reasonable, but we already have the key facts: the game is GPU-bound, the
+  stereo mode is fixed, and the expensive effects are known (SSR/AO/DOF/Bloom,
+  multi-pass, full-res render scale). The mod's own hot paths are documented
+  in 3.6.
+- **More useful**: check the game's `options.bin` defaults and the
+  `WaterSunShaftsOnCamera` code the mod already touches — that's where the
+  real per-frame GPU cost lives.
+
+### Bottom line
+
+| Idea | Verdict | Effort | Expected gain |
+|---|---|---|---|
+| 6.1 FSR injection | ⚠️ over-engineered; use 3.2 instead | High | Same as 3.2 |
+| 6.2 FFR API layer | ⚠️ real but heavy; SteamVR may already do it | Very high | Marginal over 3.2 |
+| 6.3 IL transpiler | ❌ stereo mode is baked; shader nuking = 3.3 | High | Same as 3.3 |
+| 6.4 VR LOD scaling | ❌ tested, no FPS gain; default off | Low | None (fill-rate bound) |
+| 6.5 Decompile mods | ✅ good research | Low | Informational |
+
+**Recommended order**: 3.2 (render scale) → 3.3 (post-processing off) →
+measure. 6.4 tested and failed (GPU is fill-rate/post-processing bound, not
+geometry bound). Skip 6.1–6.3 unless those aren't enough.

@@ -43,6 +43,7 @@ namespace VREnhancements
             HUD_Scale = MainPatcher.VRConfig.Bind("UI", "HUD_Scale", 1.0f, "Size of the HUD");
             HUD_Separation = MainPatcher.VRConfig.Bind("UI", "HUD_Separation", 0, "Preset for the spacing between elements of the HUD. 0 - Default, 1-Small, 2-Medium, 3-Large");
             FrameRateFix.LoadConfig();
+            VRLODScaling.LoadConfig();
         }
 
         [HarmonyPatch(typeof(uGUI_TabbedControlsPanel), nameof(uGUI_TabbedControlsPanel.AddTab))]

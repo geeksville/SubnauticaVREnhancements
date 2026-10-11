@@ -36,6 +36,9 @@ namespace VREnhancements
             // Cheap per-frame check: re-apply the FPS override in case the game
             // (or a settings reload) reset Application.targetFrameRate.
             FrameRateFix.Apply();
+
+            // Re-apply VR LOD/shadow overrides in case anything reset them.
+            VRLODScaling.Apply();
         }
 
         private void OnVRDeviceLoaded(string loadedDeviceName)
