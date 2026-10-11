@@ -182,14 +182,25 @@ From `options.bin`, the expensive ones currently on are:
 - **Expected gain**: SSR and AO are the big ones; expect meaningful GPU relief.
 - **Risk**: low; visual quality only.
 
-### 3.4 Try single-pass instanced stereo — **[mod], biggest GPU win, risky**
+### 3.4 Try single-pass instanced stereo — **[mod], biggest GPU win, risky] ❌ failed experiment**
 Patch `XRSettings.stereoRenderingMode = SinglePassInstanced` at VR init.
 
-- **Expected gain**: potentially ~1.5–2× GPU throughput on the scene pass.
-- **Risk**: **high**. Subnautica's custom shaders (water, terrain, UI) may not
-  support instancing and can render incorrectly or break. This needs a
-  test-on-device pass and probably a config flag to opt in/out.
-- **Recommendation**: implement behind a config flag, default off, and test.
+- **Attempted 2026-10-11**: implemented `SinglePassStereo.cs` which hooked the
+  `XRSettings.stereoRenderingMode` getter to report `SinglePassInstanced` and
+  reloaded the XR device (`XRSettings.LoadDeviceByName`) to re-initialize the
+  rendering path. Config-gated (`singlePassStereo = true`, default ON).
+- **Result**: **FAILED**. The game hung before reaching the title screen on
+  both launch attempts (had to be manually killed). `Player.log` showed
+  `[VR Enhancements] Patched for device: OpenVR` but the
+  `Single-pass stereo enabled` message never appeared — the
+  `XRSettings.LoadDeviceByName()` device reload hangs Unity mid-initialization.
+- **Root cause**: Unity 2019.4 exposes `XRSettings.stereoRenderingMode` as
+  **get-only** (no managed setter, no native setter, no exported function).
+  The stereo mode is baked into the build's XR settings and fixed at device
+  load. Reloading the device to change it is not viable.
+- **Verdict**: **not viable in this Unity version**. Code removed. Do not
+  retry without a fundamentally different approach (e.g. patching the native
+  rendering path, which is out of scope for a BepInEx mod).
 
 ### 3.5 Reduce FEX CPU tax — **[config] — tested, no measurable gain**
 FEX supports `STEAM_FEX_TSOENABLED` and `STEAM_FEX_MULTIBLOCK` (see
@@ -221,7 +232,7 @@ calls are comparatively expensive. The mod has several hot paths:
 These are small individually but add up under FEX. A "performance pass" that
 caches components/transforms and skips work when nothing changed is a
 low-risk, low-gain cleanup. **Note**: since the game is GPU-bound (2.2), this
-is lower priority than 3.2/3.3/3.4.
+is lower priority than 3.2/3.3.
 
 ### 3.7 Shader-cache warm-up — **[config]**
 Mesa shader cache is only ~19 MB and no DXVK cache was found, so the game is
@@ -240,7 +251,7 @@ likely still compiling shaders on first encounters (stutter). Options:
 2. **Measure** with the cap removed — ✅ done. SteamVR perf criteria shows the
    game is **GPU-bound in-game** (~26 ms frame, GPU ~26 ms, CPU ~10–13 ms).
 3. **GPU-bound confirmed** → apply 3.2 (lower render scale) and 3.3 (disable
-   SSR/AO/DOF), then optionally try 3.4 (single-pass) behind a flag.
+   SSR/AO/DOF). (3.4 single-pass was attempted and failed — see 3.4.)
 4. ~~If **CPU-bound**: apply 3.5 (FEX TSO off / multiblock) and 3.6 (mod
    hot-path cleanup).~~ — 3.5 tested, no gain. 3.6 is low priority while
    GPU-bound.
@@ -255,8 +266,9 @@ likely still compiling shaders on first encounters (stutter). Options:
   now that the game is confirmed GPU-bound.
 - **3.3** — a "VR Performance" config toggle that disables SSR/AO/DOF/Bloom.
   Also high value while GPU-bound.
-- **3.4** — a config-gated single-pass-instanced patch (default off). Biggest
-  potential GPU win, needs on-device testing.
+- **3.4** ❌ failed experiment (2026-10-11) — single-pass stereo is **not
+  viable** in Unity 2019.4: `stereoRenderingMode` is get-only and reloading
+  the XR device hangs the game. Code removed.
 - **3.6** — a hot-path cleanup pass (cache components, reduce per-frame work).
   Low priority while GPU-bound.
 
