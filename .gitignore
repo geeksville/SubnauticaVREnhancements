@@ -360,3 +360,8 @@ MigrationBackup/
 
 # Fody - auto-generated XML schema
 FodyWeavers.xsd
+
+# Subnautica VR Enhancements build artifacts
+# Reference DLLs fetched from the Steam Frame (see bin/build-mod.sh)
+/lib/
+

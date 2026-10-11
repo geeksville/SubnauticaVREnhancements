@@ -16,6 +16,12 @@ RUN apt-get update && apt-get -y install --no-install-recommends \
 # for native code in python modules
 RUN apt-get install -y cmake build-essential python3-dev
 
+# .NET tooling for building the Subnautica VR Enhancements mod (net472).
+# dotnet-sdk-8.0 provides the SDK + MSBuild.  The BepInEx AssemblyPublicizer
+# CLI is installed as a global dotnet tool below (as the vscode user, so it
+# lands in ~/.dotnet/tools).
+RUN apt-get install -y --no-install-recommends dotnet-sdk-8.0
+
 # Create a non-root user if one doesn't exist, and give it sudo rights
 RUN if ! id -u ${USERNAME} > /dev/null 2>&1; then \
         groupadd --gid 1000 ${USERNAME} && \
@@ -24,6 +30,15 @@ RUN if ! id -u ${USERNAME} > /dev/null 2>&1; then \
         fi
 
 USER ${USERNAME}
+
+# Install the BepInEx AssemblyPublicizer as the vscode user (global dotnet
+# tools live in ~/.dotnet/tools).  DOTNET_ROLL_FORWARD lets the net6.0 tool
+# run on the .NET 8 runtime installed above.
+RUN dotnet tool install --global BepInEx.AssemblyPublicizer.Cli && \
+    echo 'export PATH="$PATH:$HOME/.dotnet/tools"' >> /home/${USERNAME}/.bashrc && \
+    echo 'export PATH="$PATH:$HOME/.dotnet/tools"' >> /home/${USERNAME}/.zshrc && \
+    echo 'export DOTNET_ROLL_FORWARD=Major' >> /home/${USERNAME}/.bashrc && \
+    echo 'export DOTNET_ROLL_FORWARD=Major' >> /home/${USERNAME}/.zshrc
 
 # Some containers might not have a .local directory at all, don't fail in that case
 RUN mkdir -p /home/${USERNAME}/.local/bin
